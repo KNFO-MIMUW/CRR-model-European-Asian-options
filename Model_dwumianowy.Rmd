@@ -1,0 +1,144 @@
+---
+title: "Wycena opcji europejskich i azjatyckich w modelu dwumianowym"
+subtitle: "Ko³o Naukowe Finansów Obliczeniowych"
+author: "Jan Koœcia³kowski"
+date: "1 listopada 2017"
+geometry: margin=2cm
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+Celem tego raportu jest przedstawienie metod wyceny opcji w modelu CRR w œrodowisku R. Rozwa¿ano europejskie i azjatyckie opcje call i dla ka¿dego z przypadków zaimplementowano odpowiedni¹ funkcjê.
+
+## Wycena opcji europejskich
+
+W tym przypadku wycena sprowadza siê wy³¹cznie do wyznaczenia wartoœci oczekiwanej wyp³aty z akcji, a nastêpnie zdyskontowania na moment 0. Nie przedstawia to trudnoœci, poniewa¿ wielkoœci wzrostu i spadku ceny oraz prawdopodobieñstwa tych zdarzeñ s¹ okreœlone przez parametry wejœciowe, a wynik zale¿y tylko od ceny instrumentu bazowego w momencie wykupu. Wyceny opcji europejskich w modelu dwumianowym dla podanych przez u¿ytkownika parametrów wejœciowych dokonuje poni¿sza funkcja.
+
+```{r european}
+priceEuropean <- function(S_0, # cena instrumentu bazowego w chwili 0 
+                          K, # cena wykonania
+                          r, # intensywnoœæ oprocentowania
+                          sigma, # zmiennoœæ
+                          t, # czas do wykupu opcji
+                          n) { # na ile odcinków jest dzielony przedzia³ [0,t]
+    
+    delta_n <- t/n
+    
+    u_n <- exp(sigma * sqrt(delta_n))
+    d_n <- exp(- sigma * sqrt(delta_n))
+    
+    p_n <- (exp(r * delta_n) - d_n)/(u_n - d_n)
+    
+    exp(-r * t) * sum(choose(n, 0:n) * p_n^(0:n) * (1 - p_n)^(n:0) 
+                      * sapply(S_0 * u_n^(0:n) * d_n^(n:0) - K, max, 0))
+}
+```
+
+
+## Wycena opcji azjatyckich
+
+Ten przypadek jest nieco bardziej skomplikowany - wyznaczenie analitycznego wzoru na cenê opcji w tym modelu by³oby bardzo skomplikowane. Zamiast tego mo¿na zastosowaæ podejœcie Monte Carlo - zasymulowaæ pewn¹ du¿¹ liczbê trajektorii procesu ceny w oparciu o model dwumianowy, dla ka¿dej z nich obliczyæ wyp³atê w momencie `t`, a nastêpnie wszystkie wyp³aty uœredniæ i zdyskontowaæ na moment 0.
+
+```{r asian, message=FALSE}
+priceAsian <- function(S_0, # cena instrumentu bazowego w chwili 0
+                       K, # cena wykonania
+                       r, # intensywnoœæ oprocentowania
+                       sigma, # zmiennoœæ
+                       t, # czas do wykupu opcji
+                       n, # na ile odcinków dzielony jest przedzia³ [0,t]
+                       n_average, # z ilu punktów œrednia w wyp³acie z opcji azjatyckiej
+                       n_MC, # liczba iteracji Monte Carlo
+                       plotSimulations = TRUE) { # czy prezentowaæ symulacje na wykresie
+    
+    delta_n <- t/n
+    u_n <- exp(sigma * sqrt(delta_n))
+    d_n <- exp(- sigma * sqrt(delta_n))
+    p_n <- (exp(r * delta_n) - d_n)/(u_n - d_n)
+    
+    # Sprawdzanie czy model dwumianowy ma szansê zadzia³aæ
+    if(delta_n >= sigma^2/r^2) stop("Nieodpowiednie dane wejœciowe!")
+    
+    plotTrajectories <- NULL
+    price <- 0
+    traject <- vector()
+    
+    for(i in 1:n_MC) {
+        
+        # Generowanie ruchów cen w górê
+        traject[1] <- rbinom(n = 1, size = 1, prob = p_n)
+        for(j in 2:n) traject[j] <- traject[j - 1] + rbinom(n = 1, size = 1, prob = p_n)
+        
+        # Wyznaczanie ceny w ka¿dym momencie przy u¿yciu wygenerowanych ruchów
+        traject <- S_0 * u_n ^ traject * d_n ^ (1:n - traject)
+        
+        # Odk³adanie niektórych trajektorii do rysowania wykresów
+        if(plotSimulations & i%%500 == 0) plotTrajectories <- cbind(plotTrajectories, traject)
+        
+        # Wyp³ata przy danej trajektorii jest uwzglêdniania w finalnej cenie
+        price <- price + 1/n_MC * max(mean(traject[floor(n/n_average*1:n_average)]) - K, 0)
+    }
+    
+    # Dyskontowanie na moment 0
+    price <- exp(- r * t) * price
+    
+    if(plotSimulations) {
+        plotTrajectories <- as.data.frame(plotTrajectories)
+        colnames(plotTrajectories) <- 1:ncol(plotTrajectories)
+        plotTrajectories <- plotTrajectories %>% 
+            gather(key = Trajektoria, value = Cena) %>% 
+            mutate(Czas = rep(t/n*1:n, ncol(plotTrajectories)))
+        
+        g <- ggplot(data = plotTrajectories, 
+                    mapping = aes(x = Czas, y = Cena, colour = Trajektoria),
+                    environment = environment())
+        g <- g + geom_line() + geom_hline(yintercept = K) + theme(legend.position = "none") + 
+            scale_color_brewer(palette = "Spectral")
+        return(list(price = price, plot = g))
+    }
+    
+    price
+}
+```
+
+Przyk³adowe wykorzystanie powy¿szej funkcji:
+
+```{r example, message=FALSE, results='hide'}
+set.seed(1234)
+priceAsian(80, 90, .05, .1, 1, 300, 100, 3000, TRUE)
+```
+
+Metody Monte Carlo potrafi¹ byæ czasoch³onne, wiêc zbadano czas obliczeñ w zale¿noœci od argumentu `n_MC`, przy ustalonych wszystkich pozosta³ych. Wybrano arbitralnie `n = 500` i `n_average = 30`. 
+
+```{r runtime, cache = TRUE}
+set.seed(123)
+n_MC <- c(1000, 2500, 5000, 7500, 10000, 25000, 50000, 100000, 150000)
+
+time <- vector()
+
+for(i in 1:length(n_MC)) {
+    start <- Sys.time()
+    priceAsian(100, 80, .05, .1, 1, 500, 30, n_MC[i], FALSE)
+    end <- Sys.time()
+    time[i] <- difftime(end, start, units = "mins")
+}
+```
+
+```{r runtimePlot}
+library(ggplot2)
+
+qplot(x = n_MC, y = time, xlab = "Liczba iteracji Monte Carlo", ylab = "Czas w minutach") + 
+    geom_smooth(method = "lm")
+```
+
+Czas wykonania wydaje siê rosn¹æ liniowo wraz ze wzrostem iteracji Monte Carlo, co jest bardzo zachêcaj¹cym wynikiem.
